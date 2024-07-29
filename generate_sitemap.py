@@ -36,25 +36,25 @@ async def get_url_from_clickable_element(page, selector, max_retries=2):
     original_url = page.url
     for attempt in range(1, max_retries + 1):
         try:
-            await page.wait_for_load_state('networkidle', timeout=10000)
-            element = await page.wait_for_selector(selector, state="visible", timeout=5000)
-            if element:
-                await page.evaluate(f"document.querySelector('{selector}').click()")
-                await page.wait_for_load_state('networkidle', timeout=10000)
-                new_url = page.url
-                if new_url != original_url:
-                    log(f"New URL: {urlparse(new_url).path}", 'success', indent=2)
-                    await page.goto(original_url)
-                    return new_url
-            log("Click did not change URL", 'warning', indent=2)
-            return None
+            await page.wait_for_selector(selector, state="visible", timeout=3000)
+            await page.wait_for_timeout(1000)
+            await page.click(selector)
+            await page.wait_for_load_state('networkidle', timeout=15000)
+            new_url = page.url
+
+            if new_url != original_url:
+                log(f"New URL: {urlparse(new_url).path}", 'success', indent=2)
+                await page.goto(original_url)
+                return new_url
+            else:
+                log("Click did not change URL", 'warning', indent=2)
+                return None
         except Exception as e:
             log(f"Error: {str(e)[:50]}...", 'error', indent=2)
             await asyncio.sleep(2 ** attempt)
     
     log(f"Failed after {max_retries} attempts", 'error', indent=2)
     return None
-
 
 async def process_links(page, base_url, selector):
     log(f"Searching {selector} elements", 'warning', indent=1)
@@ -74,16 +74,29 @@ async def process_links(page, base_url, selector):
     else:  # role=link
         original_url = page.url
         role_link_elements = await page.query_selector_all('[role="link"]')
-        for index, element in enumerate(role_link_elements, start=1):
+        for index, element in enumerate(role_link_elements):
+            unique_id = f'temp-link-{index}'
+            await page.evaluate(f'(el) => el.setAttribute("data-temp-id", "{unique_id}")', element)
             try:
-                url = await get_url_from_clickable_element(page, f'[role="link"]:nth-of-type({index})')
+                url = await get_url_from_clickable_element(page, f'[data-temp-id="{unique_id}"]')
                 if url and urlparse(url).netloc == urlparse(base_url).netloc:
                     new_urls.append(url)
                     log(f"New URL: {urlparse(url).path}", 'url', indent=2)
                 await page.goto(original_url)
+                await page.wait_for_load_state('networkidle')
             except Exception as e:
-                log(f"Error: {str(e)[:50]}...", 'error', indent=2)
-            await page.wait_for_load_state('networkidle')
+                log(f"Error: {str(e)[:5000]}...", 'error', indent=2)
+            
+            try:
+                # Check if the element is still attached to the DOM
+                is_attached = await page.evaluate(f'!!document.querySelector("[data-temp-id=\\"{unique_id}\\"]")')
+                if is_attached:
+                    await page.evaluate(f'(el) => el.removeAttribute("data-temp-id")', element)
+            except Exception as e:
+                log(f"Error removing attribute: {str(e)[:5000]}...", 'warning', indent=2)
+
+        await page.wait_for_load_state('networkidle')
+
 
     return new_urls
 
