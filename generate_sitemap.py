@@ -36,25 +36,25 @@ async def get_url_from_clickable_element(page, selector, max_retries=2):
     original_url = page.url
     for attempt in range(1, max_retries + 1):
         try:
-            await page.wait_for_selector(selector, state="visible", timeout=3000)
-            await page.wait_for_timeout(1000)
-            await page.click(selector)
-            await page.wait_for_load_state('networkidle', timeout=15000)
-            new_url = page.url
-
-            if new_url != original_url:
-                log(f"New URL: {urlparse(new_url).path}", 'success', indent=2)
-                await page.goto(original_url)
-                return new_url
-            else:
-                log("Click did not change URL", 'warning', indent=2)
-                return None
+            await page.wait_for_load_state('networkidle', timeout=10000)
+            element = await page.wait_for_selector(selector, state="visible", timeout=5000)
+            if element:
+                await page.evaluate(f"document.querySelector('{selector}').click()")
+                await page.wait_for_load_state('networkidle', timeout=10000)
+                new_url = page.url
+                if new_url != original_url:
+                    log(f"New URL: {urlparse(new_url).path}", 'success', indent=2)
+                    await page.goto(original_url)
+                    return new_url
+            log("Click did not change URL", 'warning', indent=2)
+            return None
         except Exception as e:
             log(f"Error: {str(e)[:50]}...", 'error', indent=2)
             await asyncio.sleep(2 ** attempt)
     
     log(f"Failed after {max_retries} attempts", 'error', indent=2)
     return None
+
 
 async def process_links(page, base_url, selector):
     log(f"Searching {selector} elements", 'warning', indent=1)
