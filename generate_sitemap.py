@@ -1,11 +1,12 @@
 import asyncio
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
 from colorama import init, Fore, Style
 import threading
 import itertools
 import sys
 import time
+
 
 init(autoreset=True)
 
@@ -16,32 +17,56 @@ def spinner_with_url(url):
         sys.stdout.flush()
         time.sleep(0.1)
 
+def log(message, color=Fore.WHITE):
+    print(f"{color}{message}{Style.RESET_ALL}")
+
 async def get_url_from_clickable_element(page, selector, max_retries=3):
     current_url = page.url
     for attempt in range(1, max_retries + 1):
         try:
-            spinner_thread = threading.Thread(target=spinner_with_url, args=(current_url,))
-            spinner_thread.start()
-            
+            await page.wait_for_selector(selector, state="visible", timeout=10000)
+            await page.wait_for_timeout(1000)  # Wait for 1 second
             await page.click(selector)
-            await page.wait_for_load_state('networkidle')
+            await page.wait_for_load_state('networkidle', timeout=15000)
             new_url = page.url
-            
-            spinner_thread.do_run = False
-            spinner_thread.join()
-            sys.stdout.write('\r' + ' ' * (len(current_url) + 20) + '\r')
-            sys.stdout.flush()
-            
+
             if new_url != current_url:
-                print(f"  {Fore.GREEN}Success! Retrieved new URL: {new_url}{Style.RESET_ALL}")
+                log(f"  Success! Navigated to new URL: {new_url}", Fore.GREEN)
                 return new_url
             else:
-                print(f"  {Fore.YELLOW}Clicked element did not change URL{Style.RESET_ALL}")
+                log("  Clicked element did not change URL", Fore.YELLOW)
                 return None
         except Exception as e:
-            print(f"  {Fore.RED}Error on attempt {attempt}: {e}. Retrying...{Style.RESET_ALL}")
-    raise Exception(f"Failed to get URL after {max_retries} attempts")
+            log(f"  Error on attempt {attempt}: {e}. Retrying...", Fore.RED)
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+    
+    log(f"  Failed to get URL after {max_retries} attempts", Fore.RED)
+    return None
 
+async def process_links(page, base_url, selector, link_type):
+    log(f"  Searching for {link_type} elements...", Fore.YELLOW)
+    elements = await page.query_selector_all(selector)
+    log(f"  Found {len(elements)} {link_type} elements", Fore.GREEN)
+    new_urls = []
+
+    for element in elements:
+        if selector == 'a[href]':
+            href = await element.get_attribute('href')
+            if href:
+                full_url = urljoin(base_url, href)
+                new_urls.append(full_url)
+                log(f"    Found new URL from href: {full_url}", Fore.MAGENTA)
+        else:
+            try:
+                url = await get_url_from_clickable_element(page, selector)
+                if url:
+                    new_urls.append(url)
+                    log(f"    Found new URL from {link_type}: {url}", Fore.MAGENTA)
+                await page.goto(page.url)
+            except Exception as e:
+                log(f"    Error processing {link_type} element: {e}", Fore.RED)
+
+    return new_urls
 
 async def crawl_wix_site(page, base_url):
     visited_urls = set()
@@ -52,37 +77,20 @@ async def crawl_wix_site(page, base_url):
         if current_url in visited_urls:
             continue
 
-        print(f"\n{Fore.CYAN}Visiting: {current_url}{Style.RESET_ALL}")
+        log(f"\nVisiting: {current_url}", Fore.CYAN)
         await page.goto(current_url)
         visited_urls.add(current_url)
 
-        print(f"  {Fore.YELLOW}Searching for a[href] elements...{Style.RESET_ALL}")
-        href_links = await page.query_selector_all('a[href]')
-        print(f"  {Fore.GREEN}Found {len(href_links)} a[href] elements{Style.RESET_ALL}")
-        for link in href_links:
-            href = await link.get_attribute('href')
-            if href:
-                full_url = urljoin(base_url, href)
-                if full_url not in visited_urls and full_url not in to_visit and full_url.startswith(base_url):
-                    to_visit.append(full_url)
-                    print(f"    {Fore.MAGENTA}Found new URL from href: {full_url}{Style.RESET_ALL}")
+        new_urls = await process_links(page, base_url, 'a[href]', 'a[href]')
+        new_urls += await process_links(page, base_url, '[role="link"]', 'role=link')
 
-        print(f"  {Fore.YELLOW}Searching for role='link' elements...{Style.RESET_ALL}")
-        link_elements = await page.query_selector_all('[role="link"]')
-        print(f"  {Fore.GREEN}Found {len(link_elements)} role='link' elements{Style.RESET_ALL}")
-        for element in link_elements:
-            try:
-                url = await get_url_from_clickable_element(page, '[role="link"]')
-                if url and url not in visited_urls and url not in to_visit and url.startswith(base_url):
-                    to_visit.append(url)
-                    print(f"    {Fore.MAGENTA}Found new URL from role=link: {url}{Style.RESET_ALL}")
-                await page.goto(current_url)
-            except Exception as e:
-                print(f"    {Fore.RED}Error processing role=link element: {e}{Style.RESET_ALL}")
+        for url in new_urls:
+            if url not in visited_urls and url not in to_visit and url.startswith(base_url):
+                to_visit.append(url)
 
-        print(f"{Fore.BLUE}Finished processing {current_url}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}URLs to visit: {len(to_visit)}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Visited URLs: {len(visited_urls)}{Style.RESET_ALL}")
+        log(f"Finished processing {current_url}", Fore.BLUE)
+        log(f"URLs to visit: {len(to_visit)}", Fore.CYAN)
+        log(f"Visited URLs: {len(visited_urls)}", Fore.CYAN)
 
     return visited_urls
 
@@ -95,8 +103,8 @@ async def generate_sitemap(wix_url):
     return sitemap
 
 if __name__ == "__main__":
-    wix_url = "https://ogenuite.wixsite.com/goo-studio"
+    wix_url = "https://ogenuite.wixsite.com/goo-studio/copie-de-places"
     sitemap = asyncio.run(generate_sitemap(wix_url))
-    print(f"\n{Fore.GREEN}Sitemap:{Style.RESET_ALL}")
+    log("\nSitemap:", Fore.GREEN)
     for url in sitemap:
         print(url)
